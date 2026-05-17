@@ -6,7 +6,7 @@ import { Menu } from './components/Menu';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { MouseCustomization } from './types';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogOut, User as UserIcon, Palette, Gamepad2, Settings, LogIn, AlertTriangle, Menu as MenuIcon } from 'lucide-react';
+import { LogOut, User as UserIcon, Palette, Gamepad2, Settings, LogIn, AlertTriangle, Menu as MenuIcon, Maximize, Minimize } from 'lucide-react';
 
 const DEFAULT_CUSTOMIZATION: MouseCustomization = {
   bodyColor: '#a8a29e',
@@ -19,6 +19,34 @@ export default function App() {
   const [view, setView] = useState<'game' | 'auth' | 'customizer' | 'menu'>('game');
   const [customization, setCustomization] = useState<MouseCustomization>(DEFAULT_CUSTOMIZATION);
   const [username, setUsername] = useState('');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    if (!document.fullscreenElement) {
+      try {
+        await document.documentElement.requestFullscreen();
+        if (window.screen.orientation && 'lock' in window.screen.orientation) {
+          await (window.screen.orientation as any).lock('landscape').catch(() => {
+            console.log('Orientation lock not supported or failed');
+          });
+        }
+      } catch (err) {
+        console.error('Error attempting to enable fullscreen:', err);
+      }
+    } else {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      }
+    }
+  };
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -91,6 +119,14 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4">
+          <button 
+            onClick={toggleFullscreen}
+            className="p-2 hover:bg-white/10 rounded-full transition-colors flex items-center justify-center order-last md:order-first"
+            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+          >
+            {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+          </button>
+
           {session ? (
             <>
               <button 
