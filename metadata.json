@@ -1,0 +1,6 @@
+{
+  "name": "Mouse Scurry",
+  "description": "A precision platformer where a mouse navigates obstacles using a joystick to reach its hole.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
