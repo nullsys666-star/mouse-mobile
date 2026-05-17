@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Mouse as MouseIcon, DoorOpen, Trophy, RefreshCw, ChevronRight, Play } from 'lucide-react';
 import { Joystick } from './Joystick';
 import { CANVAS_WIDTH, CANVAS_HEIGHT, GRAVITY, JUMP_FORCE, MOVE_SPEED, FRICTION } from '../constants';
-import { GameState, Player, Entity, MouseCustomization } from '../types';
+import { GameState, Player, Entity, MouseCustomization, PlayerState, Vector } from '../types';
+import { playJumpSound, playCheeseSound, playHazardSound, playWinSound } from '../lib/audio';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 const INITIAL_PLAYER_BASE = {
   id: 'player',
@@ -14,50 +16,86 @@ const INITIAL_PLAYER_BASE = {
   facingRight: true,
 };
 
-const createLevel = (level: number): Entity[] => {
+const createLevel = (level: number): { entities: Entity[], totalCheese: number } => {
   const entities: Entity[] = [
     // Floor
-    { id: 'floor', pos: { x: 0, y: CANVAS_HEIGHT - 40 }, size: { x: CANVAS_WIDTH * 10, y: 40 }, type: 'platform' },
+    { id: 'floor', pos: { x: 0, y: CANVAS_HEIGHT - 40 }, size: { x: CANVAS_WIDTH * 2 * level, y: 40 }, type: 'platform' },
     // Hole (End goal)
-    { id: 'hole', pos: { x: 800 + (level * 600), y: CANVAS_HEIGHT - 90 }, size: { x: 50, y: 50 }, type: 'hole' },
+    { id: 'hole', pos: { x: (1200 * level), y: CANVAS_HEIGHT - 90 }, size: { x: 60, y: 60 }, type: 'hole' },
   ];
 
-  // Obstacles based on level
-  for (let i = 0; i < level + 3; i++) {
+  let totalCheese = 0;
+
+  // Fixed Platforms & Cheese
+  for (let i = 1; i <= level * 5; i++) {
+    const x = 300 + i * 250;
+    const y = CANVAS_HEIGHT - 120 - (Math.random() * 150);
+    const w = 100 + Math.random() * 50;
+    const h = 20;
+    
     entities.push({
-      id: `obs-${i}`,
-      pos: { x: 400 + i * 350, y: CANVAS_HEIGHT - 40 - (Math.random() * 80 + 20) },
-      size: { x: 80, y: 20 },
+      id: `plat-${i}`,
+      pos: { x, y },
+      size: { x: w, y: h },
       type: 'platform',
     });
-  }
 
-  // Floating platforms
-  if (level > 1) {
-    for (let i = 0; i < level; i++) {
-        entities.push({
-            id: `float-${i}`,
-            pos: { x: 600 + i * 400, y: CANVAS_HEIGHT - 180 - (Math.random() * 40) },
-            size: { x: 120, y: 20 },
-            type: 'platform'
-        });
+    // Add cheese on platform
+    if (Math.random() > 0.3) {
+      entities.push({
+        id: `cheese-${i}`,
+        pos: { x: x + w / 2 - 10, y: y - 30 },
+        size: { x: 20, y: 20 },
+        type: 'cheese',
+      });
+      totalCheese++;
     }
   }
 
-  return entities;
+  // Hazards (Spikes)
+  for (let i = 0; i < level * 3; i++) {
+    entities.push({
+      id: `hazard-${i}`,
+      pos: { x: 500 + i * 600 + Math.random() * 200, y: CANVAS_HEIGHT - 65 },
+      size: { x: 40, y: 25 },
+      type: 'hazard',
+    });
+  }
+
+  // Moving Platforms
+  if (level > 1) {
+    for (let i = 0; i < level - 1; i++) {
+      const startX = 800 + i * 1200;
+      entities.push({
+        id: `m-plat-${i}`,
+        pos: { x: startX, y: 200 },
+        size: { x: 100, y: 20 },
+        type: 'moving_platform',
+        vel: { x: 2, y: 0 },
+        range: { min: startX, max: startX + 400 }
+      });
+    }
+  }
+
+  return { entities, totalCheese };
 };
 
 interface GameProps {
   customization: MouseCustomization;
+  username?: string;
+  userId?: string;
 }
 
-export const Game: React.FC<GameProps> = ({ customization }) => {
+export const Game: React.FC<GameProps> = ({ customization, username, userId }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [peers, setPeers] = useState<Record<string, PlayerState>>({});
   const [uiState, setUiState] = useState({
     level: 1,
     gameOver: false,
     gameWon: false,
     startTime: Date.now(),
+    cheeseCount: 0,
+    totalCheese: 0,
   });
   const [time, setTime] = useState('00:00');
 
@@ -71,14 +109,90 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
     }, 1000);
     return () => clearInterval(timer);
   }, [uiState.startTime, uiState.gameOver, uiState.gameWon]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !userId) return;
+
+    const channel = supabase.channel('room:game', {
+      config: {
+        presence: {
+          key: userId,
+        },
+      },
+    });
+
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState();
+        const players: Record<string, PlayerState> = {};
+        Object.keys(state).forEach((key) => {
+          if (key !== userId) {
+            const presence = state[key] as any;
+            if (presence[0]) players[key] = presence[0];
+          }
+        });
+        setPeers(players);
+      })
+      .on('broadcast', { event: 'move' }, (payload) => {
+        if (payload.userId !== userId) {
+            setPeers(prev => ({
+                ...prev,
+                [payload.userId]: payload.state
+            }));
+        }
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await channel.track({
+            id: userId,
+            username: username || 'Anonymous Mouse',
+            pos: stateRef.current.player.pos,
+            facingRight: stateRef.current.player.facingRight,
+            customization: stateRef.current.player.customization,
+            level: stateRef.current.level
+          });
+        }
+      });
+
+    const syncInterval = setInterval(() => {
+        if (channel.state === 'joined') {
+            channel.send({
+                type: 'broadcast',
+                event: 'move',
+                userId,
+                state: {
+                    id: userId,
+                    username: username || 'Anonymous Mouse',
+                    pos: stateRef.current.player.pos,
+                    facingRight: stateRef.current.player.facingRight,
+                    customization: stateRef.current.player.customization,
+                    level: stateRef.current.level
+                }
+            });
+        }
+    }, 100);
+
+    return () => {
+      clearInterval(syncInterval);
+      supabase.removeChannel(channel);
+    };
+  }, [userId, username]);
   
-  const stateRef = useRef<GameState>({
-    player: { ...INITIAL_PLAYER_BASE, customization } as Player,
-    entities: createLevel(1),
-    level: 1,
-    gameOver: false,
-    gameWon: false,
-  });
+  const stateRef = useRef<GameState>(null!);
+  
+  if (!stateRef.current) {
+    const { entities, totalCheese } = createLevel(1);
+    stateRef.current = {
+      player: { ...INITIAL_PLAYER_BASE, customization } as Player,
+      entities,
+      level: 1,
+      gameOver: false,
+      gameWon: false,
+      cheeseCount: 0,
+      totalCheese,
+      startTime: Date.now(),
+    };
+  }
 
   const cameraXRef = useRef(0);
   const joystickValue = useRef({ x: 0, y: 0 });
@@ -86,15 +200,19 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
   const lastTimeRef = useRef<number>(0);
 
   const resetGame = useCallback((level: number = 1) => {
+    const { entities, totalCheese } = createLevel(level);
     stateRef.current = {
       player: { ...INITIAL_PLAYER_BASE, customization } as Player,
-      entities: createLevel(level),
+      entities,
       level,
       gameOver: false,
       gameWon: false,
+      cheeseCount: 0,
+      totalCheese,
+      startTime: Date.now(),
     };
     cameraXRef.current = 0;
-    setUiState({ level, gameOver: false, gameWon: false, startTime: Date.now() });
+    setUiState({ level, gameOver: false, gameWon: false, startTime: Date.now(), cheeseCount: 0, totalCheese });
   }, [customization]);
 
   const jump = useCallback(() => {
@@ -102,7 +220,58 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
     if (!s.player.onGround || s.gameOver || s.gameWon) return;
     s.player.vel.y = JUMP_FORCE;
     s.player.onGround = false;
+    playJumpSound();
   }, []);
+
+  const drawMouse = (ctx: CanvasRenderingContext2D, p: { pos: Vector, size: Vector, facingRight: boolean }, customization: MouseCustomization, usernameText?: string) => {
+    ctx.save();
+    ctx.translate(p.pos.x + p.size.x / 2, p.pos.y + p.size.y / 2);
+    if (!p.facingRight) ctx.scale(-1, 1);
+    
+    // Body
+    ctx.fillStyle = customization.bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.size.x / 2, p.size.y / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    ctx.fillStyle = customization.bodyColor;
+    ctx.strokeStyle = customization.earColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(-p.size.x / 4, -p.size.y / 2, p.size.y / 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(p.size.x / 4, -p.size.y / 6, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Nose
+    ctx.fillStyle = customization.noseColor;
+    ctx.beginPath();
+    ctx.arc(p.size.x / 2, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tail
+    ctx.strokeStyle = '#d6d3d1'; // stone-300
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-p.size.x / 2, 0);
+    ctx.quadraticCurveTo(-p.size.x, -10, -p.size.x - 5, 0);
+    ctx.stroke();
+    
+    ctx.restore();
+
+    if (usernameText) {
+      ctx.fillStyle = 'rgba(90, 90, 64, 0.6)';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(usernameText, p.pos.x + p.size.x / 2, p.pos.y - 10);
+    }
+  };
 
   const update = useCallback((time: number) => {
     if (!lastTimeRef.current) lastTimeRef.current = time;
@@ -128,10 +297,19 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
       player.pos.x += player.vel.x;
       player.pos.y += player.vel.y;
 
-      // Collision Detection
+      // Moving Platforms Logic & Entity Collisions
       let onGround = false;
+      const entitiesToRemove: string[] = [];
+
       s.entities.forEach(entity => {
-        if (entity.type === 'platform') {
+        if (entity.type === 'moving_platform' && entity.range && entity.vel) {
+          entity.pos.x += entity.vel.x;
+          if (entity.pos.x > entity.range.max || entity.pos.x < entity.range.min) {
+            entity.vel.x *= -1;
+          }
+        }
+
+        if (entity.type === 'platform' || entity.type === 'moving_platform') {
           const px = player.pos.x;
           const py = player.pos.y;
           const pw = player.size.x;
@@ -151,6 +329,9 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
                 player.pos.y = ey - ph;
                 player.vel.y = 0;
                 onGround = true;
+                if (entity.type === 'moving_platform' && entity.vel) {
+                  player.pos.x += entity.vel.x;
+                }
               } else { // Hitting bottom
                 player.pos.y = ey + eh;
                 player.vel.y = 0;
@@ -165,6 +346,28 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
               }
             }
           }
+        } else if (entity.type === 'cheese') {
+            const dist = Math.sqrt(
+              Math.pow((player.pos.x + player.size.x/2) - (entity.pos.x + entity.size.x/2), 2) +
+              Math.pow((player.pos.y + player.size.y/2) - (entity.pos.y + entity.size.y/2), 2)
+            );
+            if (dist < 30) {
+              entitiesToRemove.push(entity.id);
+              s.cheeseCount++;
+              setUiState(prev => ({ ...prev, cheeseCount: s.cheeseCount }));
+              playCheeseSound();
+            }
+        } else if (entity.type === 'hazard') {
+            const px = player.pos.x + 5;
+            const py = player.pos.y + 5;
+            const pw = player.size.x - 10;
+            const ph = player.size.y - 5;
+            
+            if (px < entity.pos.x + entity.size.x && px + pw > entity.pos.x && py < entity.pos.y + entity.size.y && py + ph > entity.pos.y) {
+              s.gameOver = true;
+              setUiState(prev => ({ ...prev, gameOver: true }));
+              playHazardSound();
+            }
         } else if (entity.type === 'hole') {
           const dist = Math.sqrt(
             Math.pow((player.pos.x + player.size.x/2) - (entity.pos.x + entity.size.x/2), 2) +
@@ -173,9 +376,25 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
           if (dist < 40) {
             s.gameWon = true;
             setUiState(prev => ({ ...prev, gameWon: true }));
+            playWinSound();
+            
+            // Save Score
+            if (isSupabaseConfigured && userId) {
+              supabase.from('scores').insert({
+                user_id: userId,
+                username: username || 'Anonymous Mouse',
+                cheese_count: s.cheeseCount,
+                level: s.level,
+                time: time
+              }).then();
+            }
           }
         }
       });
+
+      if (entitiesToRemove.length > 0) {
+        s.entities = s.entities.filter(e => !entitiesToRemove.includes(e.id));
+      }
 
       player.onGround = onGround;
 
@@ -183,6 +402,7 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
       if (player.pos.y > CANVAS_HEIGHT) {
         s.gameOver = true;
         setUiState(prev => ({ ...prev, gameOver: true }));
+        playHazardSound();
       }
       if (player.pos.x < 0) {
         player.pos.x = 0;
@@ -236,15 +456,40 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
 
         // Draw Entities
         s.entities.forEach(entity => {
-          if (entity.type === 'platform') {
-            ctx.fillStyle = '#7c9070';
+          if (entity.type === 'platform' || entity.type === 'moving_platform') {
+            ctx.fillStyle = entity.type === 'moving_platform' ? '#8c7e6d' : '#7c9070';
             ctx.beginPath();
-            ctx.roundRect(entity.pos.x, entity.pos.y, entity.size.x, entity.size.y, 20);
+            ctx.roundRect(entity.pos.x, entity.pos.y, entity.size.x, entity.size.y, 8);
             ctx.fill();
             
             // Platform Shadow
-            ctx.fillStyle = '#5a6a50';
-            ctx.fillRect(entity.pos.x, entity.pos.y + entity.size.y - 4, entity.size.x, 8);
+            ctx.fillStyle = entity.type === 'moving_platform' ? '#6d5a4a' : '#5a6a50';
+            ctx.fillRect(entity.pos.x, entity.pos.y + entity.size.y - 4, entity.size.x, 4);
+          } else if (entity.type === 'cheese') {
+            // Draw cheese wedge
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath();
+            ctx.moveTo(entity.pos.x, entity.pos.y + entity.size.y);
+            ctx.lineTo(entity.pos.x + entity.size.x, entity.pos.y + entity.size.y);
+            ctx.lineTo(entity.pos.x + entity.size.x, entity.pos.y);
+            ctx.closePath();
+            ctx.fill();
+            // Holes
+            ctx.fillStyle = '#d97706';
+            ctx.beginPath();
+            ctx.arc(entity.pos.x + 12, entity.pos.y + 15, 2, 0, Math.PI * 2);
+            ctx.arc(entity.pos.x + 15, entity.pos.y + 8, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+          } else if (entity.type === 'hazard') {
+            // Spikes
+            ctx.fillStyle = '#64748b';
+            for (let i = 0; i < 4; i++) {
+              ctx.beginPath();
+              ctx.moveTo(entity.pos.x + i * 10, entity.pos.y + entity.size.y);
+              ctx.lineTo(entity.pos.x + i * 10 + 5, entity.pos.y);
+              ctx.lineTo(entity.pos.x + (i + 1) * 10, entity.pos.y + entity.size.y);
+              ctx.fill();
+            }
           } else if (entity.type === 'hole') {
             // Shadow
             ctx.fillStyle = 'rgba(0,0,0,0.2)';
@@ -264,45 +509,15 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
         });
 
         // Draw Player
-        const p = s.player;
-        ctx.save();
-        ctx.translate(p.pos.x + p.size.x / 2, p.pos.y + p.size.y / 2);
-        if (!p.facingRight) ctx.scale(-1, 1);
-        
-        // Body
-        ctx.fillStyle = customization.bodyColor;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, p.size.x / 2, p.size.y / 2, 0, 0, Math.PI * 2);
-        ctx.fill();
-        
-        // Ears
-        ctx.fillStyle = customization.bodyColor;
-        ctx.strokeStyle = customization.earColor;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(-p.size.x / 4, -p.size.y / 2, p.size.y / 3, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
+        // Draw Peers
+        (Object.values(peers) as PlayerState[]).forEach(peer => {
+            if (peer.level === s.level) {
+                drawMouse(ctx, { pos: peer.pos, size: {x: 40, y: 30}, facingRight: peer.facingRight }, peer.customization, peer.username);
+            }
+        });
 
-        // Eye
-        ctx.fillStyle = '#000';
-        ctx.beginPath();
-        ctx.arc(p.size.x / 4, -p.size.y / 6, 2, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Nose
-        ctx.fillStyle = customization.noseColor;
-        ctx.beginPath();
-        ctx.arc(p.size.x / 2, 0, 3, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Tail
-        ctx.strokeStyle = '#d6d3d1'; // stone-300
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(-p.size.x / 2, 0);
-        ctx.quadraticCurveTo(-p.size.x, 10, -p.size.x - 10, 0);
-        ctx.stroke();
+        // Draw Player
+        drawMouse(ctx, s.player, customization, username);
 
         ctx.restore();
         ctx.restore();
@@ -357,8 +572,8 @@ export const Game: React.FC<GameProps> = ({ customization }) => {
             </div>
             <div className="w-px h-10 bg-[#f5f5f0] opacity-20"></div>
             <div>
-              <p className="text-[10px] uppercase tracking-widest opacity-70 mb-1">World</p>
-              <p className="text-2xl font-bold">Natural Scurry</p>
+              <p className="text-[10px] uppercase tracking-widest opacity-70 mb-1">Cheese Found</p>
+              <p className="text-2xl font-bold">{uiState.cheeseCount} / {uiState.totalCheese}</p>
             </div>
           </div>
           <div className="text-right">

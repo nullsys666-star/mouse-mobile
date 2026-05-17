@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import { Game } from './components/Game';
 import { Auth } from './components/Auth';
 import { Customizer } from './components/Customizer';
+import { Menu } from './components/Menu';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { MouseCustomization } from './types';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogOut, User as UserIcon, Palette, Gamepad2, Settings, LogIn, AlertTriangle } from 'lucide-react';
+import { LogOut, User as UserIcon, Palette, Gamepad2, Settings, LogIn, AlertTriangle, Menu as MenuIcon } from 'lucide-react';
 
 const DEFAULT_CUSTOMIZATION: MouseCustomization = {
   bodyColor: '#a8a29e',
@@ -15,8 +16,9 @@ const DEFAULT_CUSTOMIZATION: MouseCustomization = {
 
 export default function App() {
   const [session, setSession] = useState<any>(null);
-  const [view, setView] = useState<'game' | 'auth' | 'customizer'>('game');
+  const [view, setView] = useState<'game' | 'auth' | 'customizer' | 'menu'>('game');
   const [customization, setCustomization] = useState<MouseCustomization>(DEFAULT_CUSTOMIZATION);
+  const [username, setUsername] = useState('');
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -24,7 +26,7 @@ export default function App() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session) {
-        loadCustomization(session.user.id);
+        loadProfile(session.user.id);
       }
     });
 
@@ -33,25 +35,29 @@ export default function App() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       if (session) {
-        loadCustomization(session.user.id);
+        loadProfile(session.user.id);
       } else {
         setCustomization(DEFAULT_CUSTOMIZATION);
+        setUsername('');
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  const loadCustomization = async (userId: string) => {
+  const loadProfile = async (userId: string) => {
     if (!isSupabaseConfigured) return;
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('profiles')
-      .select('customization')
+      .select('customization, username')
       .eq('id', userId)
       .single();
 
     if (data?.customization) {
       setCustomization(data.customization);
+    }
+    if (data?.username) {
+      setUsername(data.username);
     }
   };
 
@@ -111,6 +117,12 @@ export default function App() {
           ) : (
             <div className="flex items-center gap-3">
               <button 
+                onClick={() => setView('menu')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold transition-all ${view === 'menu' ? 'bg-[#f5f5f0] text-[#5a5a40]' : 'hover:bg-white/10'}`}
+              >
+                <MenuIcon className="w-4 h-4" /> Menu
+              </button>
+              <button 
                 onClick={() => setView('customizer')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold transition-all ${view === 'customizer' ? 'bg-[#f5f5f0] text-[#5a5a40]' : 'hover:bg-white/10'}`}
               >
@@ -144,7 +156,22 @@ export default function App() {
               exit={{ opacity: 0, scale: 1.05 }}
               className="w-full"
             >
-              <Game customization={customization} />
+              <Game customization={customization} username={username} userId={session?.user?.id} />
+            </motion.div>
+          )}
+
+          {view === 'menu' && (
+            <motion.div
+              key="menu"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+            >
+              <Menu 
+                session={session} 
+                username={username} 
+                onUsernameChange={setUsername} 
+              />
             </motion.div>
           )}
 

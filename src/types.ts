@@ -8,13 +8,39 @@ export interface Entity {
   id: string;
   pos: Vector;
   size: Vector;
-  type: 'mouse' | 'platform' | 'hole' | 'obstacle' | 'cheese';
+  type: 'mouse' | 'platform' | 'hole' | 'obstacle' | 'cheese' | 'hazard' | 'moving_platform';
+  vel?: Vector; // For moving platforms/hazards
+  range?: { min: number; max: number };
 }
 
 export interface MouseCustomization {
   bodyColor: string;
   earColor: string;
   noseColor: string;
+}
+
+export interface PlayerState {
+  id: string;
+  username: string;
+  pos: Vector;
+  facingRight: boolean;
+  customization: MouseCustomization;
+  level: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  user_id: string;
+  username: string;
+  content: string;
+  created_at: string;
+}
+
+export interface ScoreEntry {
+  username: string;
+  cheese_count: number;
+  level: number;
+  time: string;
 }
 
 export interface Player extends Entity {
@@ -30,4 +56,7 @@ export interface GameState {
   level: number;
   gameOver: boolean;
   gameWon: boolean;
+  cheeseCount: number;
+  totalCheese: number;
+  startTime: number;
 }
